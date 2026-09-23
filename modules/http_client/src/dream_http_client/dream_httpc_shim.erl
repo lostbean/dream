@@ -217,8 +217,10 @@ stream_owner_wait(State) ->
             finish_owner(State, {finished, normalize_headers(Headers)});
         {http, {RequestId, {error, Reason}}} ->
             finish_owner(State, {error, format_error(Reason)});
-        {http, {RequestId, {{_Version, Status, Phrase}, _Headers, Body}}} ->
-            finish_owner(State, {error, format_complete_response_error(Status, Phrase, Body)});
+        {http, {RequestId, {{_Version, Status, _Phrase}, Headers, Body}}} ->
+            finish_owner(State, {error, {http_response, Status,
+                                         normalize_headers(Headers),
+                                         iolist_to_binary(Body)}});
         cancel_stream ->
             cleanup_zlib(maps:get(zlib, State)),
             ok;
@@ -727,11 +729,12 @@ decode_stream_message_for_selector({http, InnerMessage}) ->
             cleanup_stream_zlib(StringId),
             remove_ref_mapping(StringId),
             {stream_error, StringId, format_error(Reason)};
-        {HttpcRef, {{_HttpVersion, StatusCode, ReasonPhrase}, _Headers, Body}} ->
+        {HttpcRef, {{_HttpVersion, StatusCode, _ReasonPhrase}, Headers, Body}} ->
             StringId = get_or_create_string_id(HttpcRef),
             cleanup_stream_zlib(StringId),
             remove_ref_mapping(StringId),
-            {stream_error, StringId, format_complete_response_error(StatusCode, ReasonPhrase, Body)};
+            {http_response_error, StringId,
+             {http_response, StatusCode, normalize_headers(Headers), iolist_to_binary(Body)}};
         _ ->
             error(badarg)
     end.
