@@ -83,6 +83,16 @@ pub fn start_stream_ends_empty_204_response_test() {
   client.await_stream(handle)
 }
 
+pub fn detailed_yielder_preserves_non_utf8_error_body_test() {
+  let results =
+    mock_request("/non-utf8-error")
+    |> client.stream_yielder_detailed
+    |> yielder.to_list
+  let assert [Error(client.HttpStatusFailure(response))] = results
+  response.body
+  |> should.equal(<<69, 114, 114, 111, 114, 58, 32, 192, 193, 254, 255>>)
+}
+
 // ============================================================================
 // start_stream callback-based path (exercises decode_stream_message_for_selector)
 // ============================================================================
