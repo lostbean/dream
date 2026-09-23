@@ -214,6 +214,8 @@ stream_owner_wait(State) ->
             finish_owner(State, {finished, normalize_headers(Headers)});
         {http, {RequestId, {error, Reason}}} ->
             finish_owner(State, {error, format_error(Reason)});
+        {http, {RequestId, {{_Version, 204, _Phrase}, Headers, _Body}}} ->
+            finish_owner(State, {finished, normalize_headers(Headers)});
         {http, {RequestId, {{_Version, Status, Phrase}, _Headers, Body}}} ->
             finish_owner(State, {error, format_complete_response_error(Status, Phrase, Body)});
         cancel_stream ->
@@ -618,6 +620,10 @@ receive_stream_message(TimeoutMs) ->
             StringId = get_or_create_string_id(RequestId),
             cleanup_stream_zlib(StringId),
             {stream_error, RequestId, format_error(Reason)};
+        {http, {RequestId, {{_HttpVersion, 204, _ReasonPhrase}, Headers, _Body}}} ->
+            StringId = get_or_create_string_id(RequestId),
+            cleanup_stream_zlib(StringId),
+            {stream_end, RequestId, normalize_headers(Headers)};
         {http, {RequestId, {{_HttpVersion, StatusCode, ReasonPhrase}, _Headers, Body}}} ->
             StringId = get_or_create_string_id(RequestId),
             cleanup_stream_zlib(StringId),
@@ -693,6 +699,11 @@ decode_stream_message_for_selector({http, InnerMessage}) ->
             cleanup_stream_zlib(StringId),
             remove_ref_mapping(StringId),
             {stream_error, StringId, format_error(Reason)};
+        {HttpcRef, {{_HttpVersion, 204, _ReasonPhrase}, Headers, _Body}} ->
+            StringId = get_or_create_string_id(HttpcRef),
+            cleanup_stream_zlib(StringId),
+            remove_ref_mapping(StringId),
+            {stream_end, StringId, normalize_headers(Headers)};
         {HttpcRef, {{_HttpVersion, StatusCode, ReasonPhrase}, _Headers, Body}} ->
             StringId = get_or_create_string_id(HttpcRef),
             cleanup_stream_zlib(StringId),
