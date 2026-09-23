@@ -5,6 +5,7 @@ import dream_http_client_test
 import gleam/erlang/process
 import gleam/http
 import gleam/list
+import gleam/string
 import gleeunit/should
 
 @external(erlang, "cancellation_ffi", "await_registered")
@@ -165,6 +166,21 @@ pub fn callback_crash_cleans_up_underlying_request_test() {
     })
   let assert Ok(handle) = client.start_stream(request)
   await_registered(handle) |> should.be_true()
+  client.await_stream(handle)
+  await_cleanup(handle) |> should.be_true()
+}
+
+pub fn callback_timeout_cleans_up_underlying_request_test() {
+  let errors = process.new_subject()
+  let request =
+    mock_request("/stream/slow")
+    |> client.timeout(1000)
+    |> client.on_stream_error(fn(reason) { process.send(errors, reason) })
+
+  let assert Ok(handle) = client.start_stream(request)
+  await_registered(handle) |> should.be_true()
+  let assert Ok(reason) = process.receive(errors, 3000)
+  string.contains(string.lowercase(reason), "timeout") |> should.be_true()
   client.await_stream(handle)
   await_cleanup(handle) |> should.be_true()
 }
