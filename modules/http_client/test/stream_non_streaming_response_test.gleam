@@ -146,14 +146,12 @@ pub fn start_stream_does_not_crash_process_on_non_streaming_response_test() {
 // stream_yielder pull-based path (exercises stream_owner_wait + stream_owner_next_message)
 // ============================================================================
 
-/// Yielder to a 401 endpoint must yield Error containing "401".
-/// Uses yielder.take(1) because the yielder retries on start errors (owner
-/// never gets set), which would make yielder.to_list loop infinitely.
+/// Yielder to a 401 endpoint must yield one terminal error containing "401".
 pub fn stream_yielder_returns_error_for_401_non_streaming_response_test() {
   let req = mock_request("/status/401")
-  let results = client.stream_yielder(req) |> yielder.take(1) |> yielder.to_list
+  let results = client.stream_yielder(req) |> yielder.to_list
 
-  { results != [] } |> should.be_true()
+  list.length(results) |> should.equal(1)
 
   let assert [first, ..] = results
   case first {
