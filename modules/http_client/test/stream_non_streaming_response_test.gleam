@@ -11,6 +11,7 @@
 
 import dream_http_client/client
 import dream_http_client_test
+import gleam/bit_array
 import gleam/erlang/process
 import gleam/http
 import gleam/io
@@ -44,6 +45,42 @@ pub fn start_stream_ends_empty_204_response_test() {
   let assert Ok(handle) = client.start_stream(request)
   process.receive(completion, 3000) |> should.equal(Ok(True))
   client.await_stream(handle)
+}
+
+pub fn callback_preserves_http_error_response_test() {
+  let response_subject = process.new_subject()
+  let request =
+    mock_request("/status/429")
+    |> client.on_http_response_error(fn(response) {
+      process.send(response_subject, response)
+    })
+  let assert Ok(handle) = client.start_stream(request)
+  let assert Ok(response) = process.receive(response_subject, 3000)
+  client.await_stream(handle)
+
+  response.status |> should.equal(429)
+  list.any(response.headers, fn(header) {
+    string.lowercase(header.name) == "retry-after" && header.value == "17"
+  })
+  |> should.be_true()
+  let assert Ok(body) = bit_array.to_string(response.body)
+  string.contains(body, "429") |> should.be_true()
+}
+
+pub fn detailed_yielder_preserves_http_error_response_test() {
+  let results =
+    mock_request("/status/429")
+    |> client.stream_yielder_detailed
+    |> yielder.to_list
+  let assert [Error(client.HttpStatusFailure(response))] = results
+
+  response.status |> should.equal(429)
+  list.any(response.headers, fn(header) {
+    string.lowercase(header.name) == "retry-after" && header.value == "17"
+  })
+  |> should.be_true()
+  let assert Ok(body) = bit_array.to_string(response.body)
+  string.contains(body, "429") |> should.be_true()
 }
 
 // ============================================================================
