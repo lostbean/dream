@@ -33,6 +33,7 @@ fn request_stream(
   connection_timeout_ms: Int,
   follow_redirects: Bool,
   certificate_authority_file: String,
+  profile: atom.Atom,
 ) -> d.Dynamic
 
 @external(erlang, "dream_httpc_shim", "fetch_next")
@@ -91,6 +92,7 @@ pub fn start_httpc_stream(
   connection_timeout_ms: Int,
   follow_redirects: Bool,
   certificate_authority_file: String,
+  profile: atom.Atom,
 ) -> d.Dynamic {
   let port_string = case request.port {
     option.Some(port) -> ":" <> int.to_string(port)
@@ -120,6 +122,7 @@ pub fn start_httpc_stream(
     connection_timeout_ms,
     follow_redirects,
     certificate_authority_file,
+    profile,
   )
 }
 
@@ -357,6 +360,7 @@ pub fn start_stream_messages(
   connection_timeout_ms: Int,
   follow_redirects: Bool,
   certificate_authority_file: String,
+  profile: atom.Atom,
 ) -> d.Dynamic
 
 /// Cancel a streaming request

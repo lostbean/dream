@@ -163,6 +163,36 @@ pub type StreamFailure {
   StreamTransportFailure(reason: String)
 }
 
+/// An isolated `httpc` connection pool. Create it once, share it among requests,
+/// and stop it when the owning application shuts down.
+pub opaque type HttpProfile {
+  HttpProfile(name: atom.Atom)
+}
+
+@external(erlang, "dream_httpc_shim", "start_profile")
+fn start_http_profile(
+  name: atom.Atom,
+  max_sessions: Int,
+) -> Result(atom.Atom, String)
+
+@external(erlang, "dream_httpc_shim", "stop_profile")
+fn stop_http_profile(name: atom.Atom) -> Result(Nil, String)
+
+/// Start an isolated profile with a bounded number of sessions per host.
+/// Choose a fixed atom name in application code; names must be unique on a node.
+pub fn start_profile(
+  name: atom.Atom,
+  max_sessions: Int,
+) -> Result(HttpProfile, String) {
+  start_http_profile(name, max_sessions) |> result.map(HttpProfile)
+}
+
+/// Stop a profile after its requests have completed or been cancelled.
+pub fn stop_profile(profile: HttpProfile) -> Result(Nil, String) {
+  let HttpProfile(name) = profile
+  stop_http_profile(name)
+}
+
 /// Error types returned by `send()`.
 ///
 /// ## Variants
@@ -237,6 +267,7 @@ pub opaque type ClientRequest {
     connection_timeout: Option(Int),
     follow_redirects: Bool,
     certificate_authority_file: Option(String),
+    profile: Option(HttpProfile),
     recorder: Option(recorder.Recorder),
     on_stream_start: Option(fn(List(Header)) -> Nil),
     on_stream_chunk: Option(fn(BitArray) -> Nil),
@@ -286,6 +317,7 @@ pub fn new() -> ClientRequest {
     connection_timeout: None,
     follow_redirects: True,
     certificate_authority_file: None,
+    profile: None,
     recorder: None,
     on_stream_start: None,
     on_stream_chunk: None,
@@ -604,6 +636,14 @@ pub fn certificate_authority_file(
   file_path: String,
 ) -> ClientRequest {
   ClientRequest(..client_request, certificate_authority_file: Some(file_path))
+}
+
+/// Send this request through an explicitly managed connection profile.
+pub fn use_profile(
+  client_request: ClientRequest,
+  profile: HttpProfile,
+) -> ClientRequest {
+  ClientRequest(..client_request, profile: Some(profile))
 }
 
 /// Set callback for stream start event
@@ -1249,6 +1289,7 @@ fn send_client_request_to_httpc_with_meta(
       resolve_connection_timeout(client_request),
       client_request.follow_redirects,
       resolve_certificate_authority_file(client_request),
+      resolve_profile(client_request),
     )
   {
     Ok(#(status, headers, response_body)) -> {
@@ -1303,6 +1344,13 @@ fn resolve_certificate_authority_file(client_request: ClientRequest) -> String {
   }
 }
 
+fn resolve_profile(client_request: ClientRequest) -> atom.Atom {
+  case client_request.profile {
+    Some(HttpProfile(name)) -> name
+    None -> atom.create("dream_http_client")
+  }
+}
+
 @external(erlang, "dream_httpc_shim", "request_sync")
 fn send_sync(
   method: d.Dynamic,
@@ -1313,6 +1361,7 @@ fn send_sync(
   connection_timeout_ms: Int,
   follow_redirects: Bool,
   certificate_authority_file: String,
+  profile: atom.Atom,
 ) -> Result(#(Int, List(#(String, String)), BitArray), String)
 
 /// Stream HTTP response chunks using a yielder
@@ -1454,6 +1503,7 @@ pub fn stream_yielder_detailed(
           certificate_authority_file: resolve_certificate_authority_file(
             client_request,
           ),
+          profile: resolve_profile(client_request),
         )
       yielder.unfold(state, handle_detailed_yielder_unfold)
     }
@@ -1529,6 +1579,7 @@ fn stream_yielder_with_record_mode(
           certificate_authority_file: resolve_certificate_authority_file(
             client_request,
           ),
+          profile: resolve_profile(client_request),
           recorder: recorder_instance,
           recorded_request: recorded_request,
           start_headers: [],
@@ -1560,6 +1611,7 @@ fn create_plain_yielder(
       certificate_authority_file: resolve_certificate_authority_file(
         client_request,
       ),
+      profile: resolve_profile(client_request),
     )
   yielder.unfold(initial_state, handle_yielder_unfold_with_deps)
 }
@@ -1589,6 +1641,7 @@ type YielderState {
     connection_timeout_ms: Int,
     follow_redirects: Bool,
     certificate_authority_file: String,
+    profile: atom.Atom,
   )
 }
 
@@ -1600,6 +1653,7 @@ type RecordingYielderState {
     connection_timeout_ms: Int,
     follow_redirects: Bool,
     certificate_authority_file: String,
+    profile: atom.Atom,
     recorder: recorder.Recorder,
     recorded_request: recording.RecordedRequest,
     start_headers: List(#(String, String)),
@@ -1667,6 +1721,7 @@ fn handle_yielder_start_with_state(
       state.connection_timeout_ms,
       state.follow_redirects,
       state.certificate_authority_file,
+      state.profile,
     )
   let owner = internal.extract_owner_pid(request_result)
   case internal.receive_next(owner, state.timeout_ms) {
@@ -1707,6 +1762,7 @@ fn handle_detailed_yielder_unfold(
           state.connection_timeout_ms,
           state.follow_redirects,
           state.certificate_authority_file,
+          state.profile,
         )
       let owner = internal.extract_owner_pid(request_result)
       receive_detailed_yielder_chunk(
@@ -1779,6 +1835,7 @@ fn handle_recording_yielder_start(
       state.connection_timeout_ms,
       state.follow_redirects,
       state.certificate_authority_file,
+      state.profile,
     )
   let owner = internal.extract_owner_pid(request_result)
   let start_headers = case
@@ -1950,6 +2007,7 @@ fn send_stream_messages_to_httpc(
       resolve_connection_timeout(client_request),
       client_request.follow_redirects,
       resolve_certificate_authority_file(client_request),
+      resolve_profile(client_request),
     )
 
   case parse_stream_start_result(start_result) {

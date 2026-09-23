@@ -94,6 +94,44 @@ pub fn simple_get() -> Result(HttpResponse, SendError) {
 
 dream_http_client provides three execution modes. Choose based on your use case:
 
+Requests use a Dream-owned `httpc` profile by default. It permits up to 100
+sessions per host and disables HTTP pipelining without changing the host
+application's default `httpc` profile. For a separate connection pool, create
+a named profile once, attach it to requests, and stop it at application shutdown:
+
+```gleam
+import dream_http_client/client
+import gleam/erlang/atom
+
+let assert Ok(profile) =
+  client.start_profile(atom.create("my_service_http"), 24)
+
+let request = client.new() |> client.use_profile(profile)
+// Add host, path, and other request options before sending.
+
+let assert Ok(Nil) = client.stop_profile(profile)
+```
+
+Profile names are node-wide Erlang atoms. Use fixed names chosen in application
+code, not names derived from user input. `max_sessions` is the per-host session
+limit for that profile.
+
+`connection_timeout`, `follow_redirects`, and `certificate_authority_file`
+are request options across all three execution modes. The first limits time
+spent establishing a connection; `timeout` limits the request itself.
+
+For streaming, `httpc` exposes headers but no status code in `stream_start`.
+Live HTTP error responses can be inspected with `stream_yielder_detailed()` or
+`on_http_response_error()`; successful stream status is unknown. A pull stream
+advances `httpc` only as chunks are requested. Callback streams remain
+push-based, so consumers should keep callbacks short or cancel the stream.
+
+Erlang `httpc` can automatically retry a `503` response with `Retry-After`.
+OTP 27 does not expose a switch to disable that behavior. Applications that
+require exact single-attempt or retry timing semantics should account for this
+before using this transport. OTP 28.4 adds an `autoretry` option, but this
+client does not currently expose it.
+
 ### 1. Blocking - `send()`
 
 **Best for:** JSON APIs, small responses

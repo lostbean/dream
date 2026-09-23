@@ -28,13 +28,13 @@ begin_cancel_trace() ->
     Parent = self(),
     Tracer = spawn(fun() ->
         receive
-            {trace, _Pid, call, {httpc, cancel_request, [_RequestId]}} ->
+            {trace, _Pid, call, {httpc, cancel_request, [_RequestId, _Profile]}} ->
                 Parent ! cancel_request_observed
         after 1500 -> ok
         end
     end),
     put(cancel_tracer, Tracer),
-    erlang:trace_pattern({httpc, cancel_request, 1}, true, [local]),
+    erlang:trace_pattern({httpc, cancel_request, 2}, true, [local]),
     erlang:trace(self(), true, [call, {tracer, Tracer}]),
     nil.
 
@@ -44,6 +44,6 @@ cancel_request_observed() ->
     after 1000 -> false
     end,
     erlang:trace(self(), false, [call]),
-    erlang:trace_pattern({httpc, cancel_request, 1}, false, [local]),
+    erlang:trace_pattern({httpc, cancel_request, 2}, false, [local]),
     exit(erase(cancel_tracer), kill),
     Result.

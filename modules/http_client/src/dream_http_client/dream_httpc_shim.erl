@@ -1,12 +1,38 @@
 -module(dream_httpc_shim).
 
 -define(REF_MAPPING_TABLE, dream_http_client_ref_mapping).
+-define(DEFAULT_PROFILE, dream_http_client).
 
--export([request_stream/9, fetch_next/2, fetch_start_headers/2, request_stream_messages/9,
+-export([request_stream/10, fetch_next/2, fetch_start_headers/2, request_stream_messages/10,
          cancel_stream/1, cancel_stream_by_string/1, cancel_stream_process/1,
          receive_stream_message/1,
-         decode_stream_message_for_selector/1, normalize_headers/1, request_sync/8,
+         decode_stream_message_for_selector/1, normalize_headers/1, request_sync/9,
+         start_profile/2, stop_profile/1,
          ets_table_exists/1, ets_new/2, ets_insert/7, ets_lookup/2, ets_delete/2]).
+
+start_profile(Name, MaxSessions)
+  when is_atom(Name), Name =/= ?DEFAULT_PROFILE, Name =/= default,
+       is_integer(MaxSessions), MaxSessions > 0 ->
+    ok = ensure_started(inets),
+    case inets:start(httpc, [{profile, Name}]) of
+        {ok, _Pid} ->
+            case httpc:set_options([{max_sessions, MaxSessions},
+                                    {max_pipeline_length, 0}], Name) of
+                ok -> {ok, Name};
+                {error, Reason} ->
+                    inets:stop(httpc, Name),
+                    {error, format_error(Reason)}
+            end;
+        {error, Reason} -> {error, format_error(Reason)}
+    end;
+start_profile(_Name, _MaxSessions) ->
+    {error, <<"Profile name must be distinct and max_sessions positive">>}.
+
+stop_profile(Name) ->
+    case inets:stop(httpc, Name) of
+        ok -> {ok, nil};
+        {error, Reason} -> {error, format_error(Reason)}
+    end.
 
 %% @doc Start a streaming HTTP request with pull-based chunk retrieval
 %%
@@ -43,26 +69,24 @@
 %% - The owner process will exit if the HTTP request fails to start
 %% - `fetch_next` will detect the dead process and return an error
 %% - Ensures `ssl` and `inets` applications are started before making requests
-%% - Configures httpc with streaming-optimized settings (no pipelining, high session cap)
+%% - Uses the Dream-owned httpc profile (or a caller-managed named profile)
 request_stream(Method, Url, Headers, Body, _Receiver, TimeoutMs, ConnectTimeoutMs,
-               FollowRedirects, CaFile) ->
+               FollowRedirects, CaFile, Profile) ->
     ok = ensure_started(ssl),
     ok = ensure_started(inets),
-    ok = configure_httpc(),
 
     NUrl = to_list(Url),
     NHeaders = maybe_add_accept_encoding(to_headers(Headers)),
     Req = build_req(NUrl, NHeaders, Body),
     HttpOpts = http_options(TimeoutMs, ConnectTimeoutMs, FollowRedirects, CaFile),
-    Owner = spawn(fun() -> stream_owner_loop(Method, Req, HttpOpts, TimeoutMs) end),
+    Owner = spawn(fun() -> stream_owner_loop(Method, Req, HttpOpts, TimeoutMs, Profile) end),
     {ok, Owner}.
 
 %% @doc Fetch the next chunk from a streaming HTTP request
 %%
 %% Retrieves the next chunk of data from an active streaming request. This function
-%% implements a pull-based model where chunks are requested on-demand rather than
-%% being pushed to a mailbox. The owner process buffers chunks internally and delivers
-%% them when requested.
+%% implements a pull-based model. The owner advances httpc by one message for
+%% each fetch; it does not maintain a response-sized chunk queue.
 %%
 %% ## Parameters
 %%
@@ -90,7 +114,7 @@ request_stream(Method, Url, Headers, Body, _Receiver, TimeoutMs, ConnectTimeoutM
 %%
 %% - Blocks until a chunk is available, timeout expires, or an error occurs
 %% - Monitors the owner process; returns error if owner dies
-%% - Owner process buffers chunks internally for efficient delivery
+%% - The owner holds at most the current chunk while delivering it
 %% - After `{finished, Headers}` or `{error, Reason}`, the stream is complete
 %% - Timeout errors are returned as `{error, timeout}`
 fetch_next(OwnerPid, TimeoutMs) ->
@@ -143,9 +167,9 @@ fetch_start_headers(OwnerPid, TimeoutMs) ->
 
 %% A request owner is the only recipient of httpc messages. The once mode lets
 %% it request one message for each fetch, without an application-side chunk queue.
-stream_owner_loop(Method, Req, HttpOpts, TimeoutMs) ->
+stream_owner_loop(Method, Req, HttpOpts, TimeoutMs, Profile) ->
     Opts = [{stream, {self, once}}, {sync, false}],
-    case httpc:request(Method, Req, HttpOpts, Opts) of
+    case httpc:request(Method, Req, HttpOpts, Opts, Profile) of
         {ok, RequestId} ->
             State = #{request_id => RequestId,
                       idle_timeout => TimeoutMs,
@@ -156,7 +180,7 @@ stream_owner_loop(Method, Req, HttpOpts, TimeoutMs) ->
                       zlib => undefined,
                       terminal => undefined},
             try stream_owner_wait(State)
-            after httpc:cancel_request(RequestId) end;
+            after httpc:cancel_request(RequestId, Profile) end;
         Error ->
             exit({stream_start_failed, Error})
     end.
@@ -270,20 +294,6 @@ ensure_started(App) ->
         {error, _Reason} ->
             ok
     end.
-
-%% Configure httpc with appropriate settings for streaming
-configure_httpc() ->
-    %% Increase parallelism and avoid head-of-line blocking with streaming
-    %% - Disable HTTP pipelining so long-lived streams don't block queued requests
-    %% - Raise session cap so concurrent streams can use separate connections
-    %% - Keep-alive tuning to allow reuse for non-streaming while not limiting concurrency
-    ok =
-        httpc:set_options([{max_sessions, 100},
-                           {max_pipeline_length, 0},
-                           {keep_alive_timeout, 60000},
-                           {max_keep_alive_length, 100}],
-                          default),
-    ok.
 
 %% Convert various types to string lists
 to_list(S) when is_binary(S) ->
@@ -477,10 +487,9 @@ build_req(Url, Headers, Body) ->
 %% - String ID is derived from httpc ref's string representation (guaranteed unique)
 %% - Ensures `ssl` and `inets` applications are started before making requests
 request_stream_messages(Method, Url, Headers, Body, ReceiverPid, TimeoutMs,
-                        ConnectTimeoutMs, FollowRedirects, CaFile) ->
+                        ConnectTimeoutMs, FollowRedirects, CaFile, Profile) ->
     ok = ensure_started(ssl),
     ok = ensure_started(inets),
-    ok = configure_httpc(),
 
     NUrl = to_list(Url),
     NHeaders = maybe_add_accept_encoding(to_headers(Headers)),
@@ -489,16 +498,16 @@ request_stream_messages(Method, Url, Headers, Body, ReceiverPid, TimeoutMs,
     HttpOpts = http_options(TimeoutMs, ConnectTimeoutMs, FollowRedirects, CaFile),
     StreamOpts = [{stream, self}, {sync, false}],
 
-    case httpc:request(Method, Req, HttpOpts, StreamOpts) of
+    case httpc:request(Method, Req, HttpOpts, StreamOpts, Profile) of
         {ok, HttpcRef} ->
             %% Convert ref to string for type-safe Gleam API
             RefString = ref_to_string(HttpcRef),
             Guardian = spawn(fun() ->
-                monitor_stream_owner(ReceiverPid, RefString, HttpcRef)
+                monitor_stream_owner(ReceiverPid, RefString, HttpcRef, Profile)
             end),
             %% Store mapping for cancellation
-            store_ref_mapping(RefString, HttpcRef),
-            store_owner_mapping(ReceiverPid, RefString, HttpcRef, Guardian),
+            store_ref_mapping(RefString, HttpcRef, Profile),
+            store_owner_mapping(ReceiverPid, RefString, HttpcRef, Profile, Guardian),
             {ok, RefString};
         {error, Reason} ->
             {error, format_error(Reason)}
@@ -506,12 +515,12 @@ request_stream_messages(Method, Url, Headers, Body, ReceiverPid, TimeoutMs,
 
 %% The callback process owns this request. Its caller may exit or detach
 %% without affecting it; if the callback process itself dies, request work ends.
-monitor_stream_owner(OwnerPid, StringId, HttpcRef) ->
+monitor_stream_owner(OwnerPid, StringId, HttpcRef, Profile) ->
     Monitor = erlang:monitor(process, OwnerPid),
     receive
         stop -> erlang:demonitor(Monitor, [flush]);
         {'DOWN', Monitor, process, OwnerPid, _Reason} ->
-            httpc:cancel_request(HttpcRef),
+            httpc:cancel_request(HttpcRef, Profile),
             cleanup_stream_zlib(StringId),
             remove_ref_mapping(StringId)
     end.
@@ -537,7 +546,7 @@ monitor_stream_owner(OwnerPid, StringId, HttpcRef) ->
 %% - After cancellation, no more messages will be sent to the receiver process
 %% - Safe to call multiple times on the same request ID
 cancel_stream(RequestId) ->
-    httpc:cancel_request(RequestId),
+    httpc:cancel_request(RequestId, ?DEFAULT_PROFILE),
     ok.
 
 %% @doc Cancel a streaming request by string ID
@@ -572,7 +581,7 @@ cancel_stream(RequestId) ->
 cancel_stream_by_string(StringId) ->
     case lookup_ref_by_string(StringId) of
         {some, HttpcRef} ->
-            httpc:cancel_request(HttpcRef),
+            httpc:cancel_request(HttpcRef, lookup_profile_by_string(StringId)),
             remove_ref_mapping(StringId),
             nil;
         none ->
@@ -585,8 +594,8 @@ cancel_stream_by_string(StringId) ->
 %% request startup. That closes the startup/cancellation race.
 cancel_stream_process(Pid) ->
     case ets:lookup(?REF_MAPPING_TABLE, {owner, Pid}) of
-        [{{owner, Pid}, {StringId, HttpcRef}}] ->
-            httpc:cancel_request(HttpcRef),
+        [{{owner, Pid}, {StringId, HttpcRef, Profile}}] ->
+            httpc:cancel_request(HttpcRef, Profile),
             cleanup_stream_zlib(StringId),
             remove_ref_mapping(StringId),
             exit(Pid, kill);
@@ -858,10 +867,9 @@ ensure_utf8_binary(Other) ->
 %% - Ensures `ssl` and `inets` applications are started before making requests
 %% - Configures httpc with appropriate timeout and redirect settings
 %% - Error reasons are formatted as binaries for Gleam compatibility
-request_sync(Method, Url, Headers, Body, TimeoutMs, ConnectTimeoutMs, FollowRedirects, CaFile) ->
+request_sync(Method, Url, Headers, Body, TimeoutMs, ConnectTimeoutMs, FollowRedirects, CaFile, Profile) ->
     ok = ensure_started(ssl),
     ok = ensure_started(inets),
-    ok = configure_httpc(),
 
     NUrl = to_list(Url),
     NHeaders = maybe_add_accept_encoding(to_headers(Headers)),
@@ -871,7 +879,7 @@ request_sync(Method, Url, Headers, Body, TimeoutMs, ConnectTimeoutMs, FollowRedi
     HttpOpts = http_options(TimeoutMs, ConnectTimeoutMs, FollowRedirects, CaFile),
     Opts = [{sync, true}, {body_format, binary}],
 
-    case httpc:request(Method, Req, HttpOpts, Opts) of
+    case httpc:request(Method, Req, HttpOpts, Opts, Profile) of
         {ok, {{_Version, StatusCode, _ReasonPhrase}, ResponseHeaders, ResponseBody}} ->
             {DecompressedBody, CleanHeaders} =
                 maybe_decompress_response(ResponseBody, ResponseHeaders),
@@ -1115,12 +1123,16 @@ ref_to_string(Ref) ->
 
 %% Store bidirectional mapping: string <-> ref
 store_ref_mapping(StringId, HttpcRef) ->
+    store_ref_mapping(StringId, HttpcRef, ?DEFAULT_PROFILE).
+
+store_ref_mapping(StringId, HttpcRef, Profile) ->
     ets:insert(?REF_MAPPING_TABLE, {StringId, HttpcRef}),
     ets:insert(?REF_MAPPING_TABLE, {HttpcRef, StringId}),
+    ets:insert(?REF_MAPPING_TABLE, {{request_profile, StringId}, Profile}),
     ok.
 
-store_owner_mapping(Pid, StringId, HttpcRef, Guardian) ->
-    ets:insert(?REF_MAPPING_TABLE, {{owner, Pid}, {StringId, HttpcRef}}),
+store_owner_mapping(Pid, StringId, HttpcRef, Profile, Guardian) ->
+    ets:insert(?REF_MAPPING_TABLE, {{owner, Pid}, {StringId, HttpcRef, Profile}}),
     ets:insert(?REF_MAPPING_TABLE, {{request_owner, StringId}, Pid}),
     ets:insert(?REF_MAPPING_TABLE, {{request_guardian, StringId}, Guardian}),
     ok.
@@ -1132,6 +1144,12 @@ lookup_ref_by_string(StringId) ->
             {some, HttpcRef};
         [] ->
             none
+    end.
+
+lookup_profile_by_string(StringId) ->
+    case ets:lookup(?REF_MAPPING_TABLE, {request_profile, StringId}) of
+        [{{request_profile, StringId}, Profile}] -> Profile;
+        [] -> ?DEFAULT_PROFILE
     end.
 
 %% Lookup string ID by httpc ref (for message translation)
@@ -1176,6 +1194,7 @@ cleanup_stream_zlib(StringId) ->
 
 %% Remove both mappings (cleanup after stream ends)
 remove_ref_mapping(StringId) ->
+    ets:delete(?REF_MAPPING_TABLE, {request_profile, StringId}),
     case ets:take(?REF_MAPPING_TABLE, {request_guardian, StringId}) of
         [{{request_guardian, StringId}, Guardian}] -> Guardian ! stop;
         [] -> ok
