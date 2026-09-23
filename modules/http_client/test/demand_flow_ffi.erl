@@ -3,7 +3,8 @@
 
 one_httpc_advance_per_fetch(Port) ->
     Url = "http://localhost:" ++ integer_to_list(Port) ++ "/stream/huge",
-    {ok, Owner} = dream_httpc_shim:request_stream(get, Url, [], <<>>, self(), 30000),
+    {ok, Owner} = dream_httpc_shim:request_stream(get, Url, [], <<>>, self(), 30000,
+                                                  15000, true, <<>>),
     try
         {ok, _Headers} = dream_httpc_shim:fetch_start_headers(Owner, 5000),
         erlang:trace_pattern({httpc, stream_next, 1}, true, [local]),
