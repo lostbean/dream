@@ -6,6 +6,9 @@ import gleam/string
 import gleam/yielder
 import gleeunit/should
 
+@external(erlang, "tls_server_ffi", "start_once")
+fn start_tls_server() -> Int
+
 fn redirect_request() -> client.ClientRequest {
   client.new()
   |> client.method(http.Get)
@@ -50,4 +53,18 @@ pub fn callback_stream_respects_disabled_redirects_test() {
   let assert Ok(reason) = process.receive(errors, 3000)
   string.contains(reason, "302") |> should.be_true()
   client.await_stream(handle)
+}
+
+pub fn custom_ca_allows_local_https_request_test() {
+  let request =
+    client.new()
+    |> client.method(http.Get)
+    |> client.scheme(http.Https)
+    |> client.host("localhost")
+    |> client.port(start_tls_server())
+    |> client.path("/")
+    |> client.certificate_authority_file("test/fixtures/tls_ca.pem")
+
+  let assert Ok(response) = client.send(request)
+  response.body |> should.equal("ok")
 }
